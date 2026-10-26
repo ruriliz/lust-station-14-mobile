@@ -1,0 +1,23 @@
+
+name: Create LustStation branch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  create-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create branch from commit
+        run: |
+          git fetch https://github.com/RedMin341/space-station-14-mobile.git f443a924f952873ba28be8bd2ad769a5f4893b2b
+          git branch luststation-277 FETCH_HEAD
+          git push origin luststation-277
