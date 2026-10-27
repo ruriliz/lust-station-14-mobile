@@ -1,0 +1,56 @@
+
+name: LustStation Android Preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Android port
+        uses: actions/checkout@v4
+        with:
+          ref: luststation-277
+
+      - name: Checkout LustStation
+        uses: actions/checkout@v4
+        with:
+          repository: makura-games/lust-station
+          path: space-station-14
+          submodules: recursive
+
+      - name: Inspect engine and patches
+        shell: bash
+        run: |
+          mkdir -p diagnostics
+
+          {
+            echo "=== LustStation commit ==="
+            git -C space-station-14 rev-parse HEAD
+
+            echo "=== RobustToolbox commit ==="
+            git -C space-station-14/RobustToolbox rev-parse HEAD
+
+            echo "=== Android patch ==="
+            git -C space-station-14/RobustToolbox apply \
+              --check ../../patches/lust-mobile.patch
+            echo "PATCH COMPATIBLE"
+          } > diagnostics/preflight.txt 2>&1 || {
+            cat diagnostics/preflight.txt
+            exit 1
+          }
+
+          cat diagnostics/preflight.txt
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: luststation-preflight-report
+          path: diagnostics/
+          if-no-files-found: warn
