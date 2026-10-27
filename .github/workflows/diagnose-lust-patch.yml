@@ -1,0 +1,59 @@
+name: Diagnose LustStation Android patch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Android port
+        uses: actions/checkout@v4
+        with:
+          ref: luststation-277
+
+      - name: Checkout LustStation engine
+        uses: actions/checkout@v4
+        with:
+          repository: space-wizards/RobustToolbox
+          ref: 08a3d120b7029d03e60b44b23fed2b2659ed3224
+          path: lust-robust
+
+      - name: Collect diagnostic files
+        shell: bash
+        run: |
+          mkdir -p diagnostics/engine
+          mkdir -p diagnostics/patch
+
+          cp patches/fobos-mobile.patch \
+            diagnostics/patch/fobos-mobile.patch
+
+          cp lust-robust/Robust.Client/Input/InputManager.cs \
+            diagnostics/engine/InputManager.cs
+
+          cp lust-robust/Robust.Client/UserInterface/UserInterfaceManager.cs \
+            diagnostics/engine/UserInterfaceManager.cs
+
+          git -C lust-robust apply \
+            --check \
+            ../patches/fobos-mobile.patch \
+            > diagnostics/patch-check.txt 2>&1 || true
+
+          git -C lust-robust apply \
+            --reject \
+            ../patches/fobos-mobile.patch \
+            > diagnostics/patch-reject-log.txt 2>&1 || true
+
+          find lust-robust -name "*.rej" -print \
+            -exec cp --parents {} diagnostics/ \;
+
+      - name: Upload diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: lust-patch-diagnostics
+          path: diagnostics/
+          if-no-files-found: error
