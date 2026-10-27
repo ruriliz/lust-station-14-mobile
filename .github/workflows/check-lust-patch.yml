@@ -19,9 +19,9 @@ jobs:
 
       - name: Check patch exists
         run: |
-          test -f patches/fobos-mobile.patch
+          test -f patches/lust-mobile.patch
           echo "Android patch found"
-          wc -l patches/fobos-mobile.patch
+          wc -l patches/lust-mobile.patch
 
       - name: Checkout LustStation RobustToolbox
         uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
 
           git -C lust-robust apply \
             --check \
-            ../patches/fobos-mobile.patch \
+            ../patches/lust-mobile.patch \
             > patch-result.txt 2>&1
 
           RESULT=$?
