@@ -1,0 +1,1727 @@
+diff --git a/MSBuild/Robust.DefineConstants.targets b/MSBuild/Robust.DefineConstants.targets
+index f67e982..46cb749 100644
+--- a/MSBuild/Robust.DefineConstants.targets
++++ b/MSBuild/Robust.DefineConstants.targets
+@@ -11,6 +11,11 @@
+         <DefineConstants>$(DefineConstants);MACOS;UNIX</DefineConstants>
+       </PropertyGroup>
+     </When>
++    <When Condition="'$(TargetOS)' == 'Android'" >
++      <PropertyGroup>
++        <DefineConstants>$(DefineConstants);LINUX;UNIX;ANDROID</DefineConstants>
++      </PropertyGroup>
++    </When>
+     <Otherwise>
+       <PropertyGroup>
+         <DefineConstants>$(DefineConstants);LINUX;UNIX;FREEDESKTOP</DefineConstants>
+diff --git a/Resources/Shaders/Internal/fov-lighting.swsl b/Resources/Shaders/Internal/fov-lighting.swsl
+index 91bd980..f42e010 100644
+--- a/Resources/Shaders/Internal/fov-lighting.swsl
++++ b/Resources/Shaders/Internal/fov-lighting.swsl
+@@ -4,21 +4,24 @@ preset raw;
+ 
+ #include "/Shaders/Internal/fov_shared.swsl"
+ 
+-const highp float g_MinVariance = 0.0;
+ uniform highp vec4 occludeColor;
+ 
+ void fragment()
+ {
+     highp float ourDist = length(worldSpaceDiff);
++    if (ourDist < 0.0001)
++    {
++        discard;
++    }
+ 
+     highp vec2 occlDist = occludeDepth(worldSpaceDiff, TEXTURE, 0.25);
+ 
+-    highp float occlusion = ChebyshevUpperBound(occlDist, ourDist);
++    highp float occlusion = clamp(ChebyshevUpperBound(occlDist, ourDist), 0.0, 1.0);
+ 
+-    if (occlusion >= 1.0)
++    if (!(occlusion < 1.0))
+     {
+         discard;
+     }
+ 
+-    COLOR = vec4(occludeColor.rgb, 1.0 - occlusion);
++    COLOR = vec4(occludeColor.rgb, clamp(1.0 - occlusion, 0.0, 1.0));
+ }
+diff --git a/Resources/Shaders/Internal/fov.swsl b/Resources/Shaders/Internal/fov.swsl
+index 2790536..de469d4 100644
+--- a/Resources/Shaders/Internal/fov.swsl
++++ b/Resources/Shaders/Internal/fov.swsl
+@@ -4,12 +4,15 @@ preset raw;
+ 
+ #include "/Shaders/Internal/fov_shared.swsl"
+ 
+-const highp float g_MinVariance = 0.0;
+ uniform highp vec4 occludeColor;
+ 
+ void fragment()
+ {
+     highp float ourDist = length(worldSpaceDiff);
++    if (ourDist < 0.0001)
++    {
++        discard;
++    }
+ 
+     highp float occlDist = occludeDepth(worldSpaceDiff, TEXTURE, 0.75).r;
+ 
+diff --git a/Resources/Shaders/Internal/light-hard.swsl b/Resources/Shaders/Internal/light-hard.swsl
+index 7998888..d9b76b7 100644
+--- a/Resources/Shaders/Internal/light-hard.swsl
++++ b/Resources/Shaders/Internal/light-hard.swsl
+@@ -3,9 +3,10 @@
+ highp float createOcclusion(highp vec2 diff)
+ {
+     highp float ourDist = length(diff);
++    if (ourDist < 0.0001) return 1.0;
+ 
+     highp vec2 occlDist = occludeDepth(diff, shadowMap, lightIndex);
+ 
+-    return smoothstep(0.1, 1.0, ChebyshevUpperBound(occlDist, ourDist));
++    return clamp(smoothstep(0.1, 1.0, ChebyshevUpperBound(occlDist, ourDist)), 0.0, 1.0);
+ }
+ 
+diff --git a/Resources/Shaders/Internal/light-soft.swsl b/Resources/Shaders/Internal/light-soft.swsl
+index 79cfaee..1aa4080 100644
+--- a/Resources/Shaders/Internal/light-soft.swsl
++++ b/Resources/Shaders/Internal/light-soft.swsl
+@@ -8,11 +8,11 @@ highp vec4 calcGaussianWeights(highp float sigma, highp vec4 offset)
+ 
+ highp float createOcclusion(highp vec2 diff)
+ {
+-    // Calculate vector perpendicular to light vector.
+-    // So we can sample it to get a decent soft shadow?
+-    highp vec2 perpendicular = normalize(cross(vec3(diff, 0.0), vec3(0.0, 0.0, 1.0)).xy) * 1.0 / 32.0;
+-
+     highp float ourDist = length(diff);
++    if (ourDist < 0.0001) return 1.0;
++
++    // Calculate vector perpendicular to light vector.
++    highp vec2 perpendicular = vec2(-diff.y, diff.x) / ourDist * (1.0 / 32.0);
+ 
+     // Sample 7 points on a line perpendicular to the light source.
+     // Depending on the closest point, we change the gaussian weights down below
+@@ -40,19 +40,13 @@ highp float createOcclusion(highp vec2 diff)
+     mindist = max(0.001, mindist);
+ 
+     // Change soft shadow size based on distance from primary occluder.
+-    highp float distRatio = (ourDist - mindist);
++    highp float distRatio = max(0.0, ourDist - mindist);
+ 
+     // Sigma can never be zero so make sure to clamp.
+-    // TODO: Scaling the dist ratio here in a more sane way might make shadows look better buuuut I'm lazy.
+-    // Shadows look pretty nice already.
+     highp float sigma = max(0.001, distRatio * 0.75);
+     highp vec4 weights = calcGaussianWeights(sigma, vec4(0.0, 1.0, 2.0, 3.0));
+ 
+-    // Calculation of gaussian weights here is broken because it doesn't add up to 1.
+-    // Fixing this is hard and if I had to guess too expensive for GPU shaders.
+-    // So instead we add up the total weights and scale the result with that,
+-    // so that we still end up with 0-1.
+-    highp float totalWeigths = weights.x + weights.y * 2.0 + weights.z * 2.0 + weights.w * 2.0;
++    highp float totalWeigths = max(0.0001, weights.x + weights.y * 2.0 + weights.z * 2.0 + weights.w * 2.0);
+ 
+     highp float occlusion = 0.0;
+ 
+@@ -65,6 +59,6 @@ highp float createOcclusion(highp vec2 diff)
+     occlusion += ChebyshevUpperBound(sample6, ourDist) * weights.w;
+     occlusion += ChebyshevUpperBound(sample7, ourDist) * weights.w;
+ 
+-    return occlusion / totalWeigths;
++    return clamp(occlusion / totalWeigths, 0.0, 1.0);
+ }
+ 
+diff --git a/Resources/Shaders/Internal/light_shared.swsl b/Resources/Shaders/Internal/light_shared.swsl
+index e101e4a..075f2a2 100644
+--- a/Resources/Shaders/Internal/light_shared.swsl
++++ b/Resources/Shaders/Internal/light_shared.swsl
+@@ -4,8 +4,6 @@ preset raw;
+ 
+ const highp float LIGHTING_HEIGHT = 1.0;
+ 
+-const highp float g_MinVariance = 0.0;
+-
+ varying highp vec2 worldPosition;
+ 
+ uniform highp vec4 lightColor;
+@@ -44,10 +42,11 @@ void fragment()
+     // Totally not hacky PCF on top of VSM.
+     highp float occlusion = lightIndex < 0.0 ? 1.0 : createOcclusion(diff);
+ 
+-    if (occlusion == 0.0)
++    if (!(occlusion > 0.0))
+     {
+         discard;
+     }
++    occlusion = clamp(occlusion, 0.0, 1.0);
+ 
+     // this implementation of light attenuation primarily adapted from
+     // https://lisyarus.github.io/blog/posts/point-light-attenuation.html
+@@ -62,6 +61,6 @@ void fragment()
+     val *= lightPower;
+     val *= mask;
+ 
+-    COLOR = vec4(lightColor.rgb, val * occlusion);
++    COLOR = vec4(lightColor.rgb, clamp(val * occlusion, 0.0, 10.0));
+ }
+ 
+diff --git a/Resources/Shaders/Internal/shadow_cast_shared.swsl b/Resources/Shaders/Internal/shadow_cast_shared.swsl
+index 6ed529f..1918ef4 100644
+--- a/Resources/Shaders/Internal/shadow_cast_shared.swsl
++++ b/Resources/Shaders/Internal/shadow_cast_shared.swsl
+@@ -1,12 +1,13 @@
+ // Shared code necessary for using depth casting like FOV and shadows.
+ 
+ const highp float PI = 3.1415926535897932384626433; // That enough digits?
++const highp float g_MinVariance = 0.0;
+ 
+ // This returns a vec2 because of VSM moments.
+ highp vec2 occludeDepth(highp vec2 rel, sampler2D shadowMap, highp float mapOffsetY)
+ {
+-    // It's a circle now, because it's faster to compute.
+-    highp float deflect = (atan(rel.y, -rel.x) / PI);
++    // Protect against rel == vec2(0.0) where atan(0,0) is undefined and returns NaN on Mali GPUs.
++    highp float deflect = (dot(rel, rel) < 0.0000001) ? 0.0 : (atan(rel.y, -rel.x) / PI);
+     highp float mapOffsetX = (deflect + 1.0) / 2.0;
+     return zClydeShadowDepthUnpack(texture2D(shadowMap, vec2(mapOffsetX, mapOffsetY)));
+ }
+@@ -14,6 +15,7 @@ highp vec2 occludeDepth(highp vec2 rel, sampler2D shadowMap, highp float mapOffs
+ bool doesOcclude(highp vec2 diff, sampler2D shadowMap, highp float mapOffsetY, highp float bias)
+ {
+     highp float ourDist = length(diff);
++    if (ourDist < 0.0001) return false;
+ 
+     return occludeDepth(diff, shadowMap, mapOffsetY).x + bias < ourDist;
+ }
+@@ -22,12 +24,13 @@ bool doesOcclude(highp vec2 diff, sampler2D shadowMap, highp float mapOffsetY, h
+ highp float ChebyshevUpperBound(highp vec2 moments, highp float t)
+ {
+     // One-tailed inequality valid if t > Moments.x
+-    highp float p = float(t <= moments.x);
++    highp float p = (t <= moments.x) ? 1.0 : 0.0;
+     // Compute variance.
+     highp float variance = moments.y - (moments.x * moments.x);
+-    variance = max(variance, g_MinVariance);
++    variance = max(variance, max(g_MinVariance, 0.0001));
+     // Compute probabilistic upper bound.
+     highp float d = t - moments.x;
+-    highp float p_max = variance / (variance + d*d);
+-    return max(p, p_max);
++    highp float p_max = clamp(variance / max(variance + d*d, 0.00001), 0.0, 1.0);
++    return clamp(max(p, p_max), 0.0, 1.0);
+ }
++
+diff --git a/Robust.Client/CommandLineArgs.cs b/Robust.Client/CommandLineArgs.cs
+index 8c6640c..c7e37dd 100644
+--- a/Robust.Client/CommandLineArgs.cs
++++ b/Robust.Client/CommandLineArgs.cs
+@@ -37,34 +37,32 @@ internal sealed class CommandLineArgs
+         var mountOptions = new MountOptions();
+         var execCommands = new List<string>();
+ 
+-        using var enumerator = args.GetEnumerator();
+-
+-        while (enumerator.MoveNext())
++        for (var i = 0; i < args.Count; i++)
+         {
+-            var arg = enumerator.Current;
++            var arg = args[i];
+             if (arg == "--connect")
+             {
+                 connect = true;
+             }
+             else if (arg == "--connect-address")
+             {
+-                if (!enumerator.MoveNext())
++                if (++i >= args.Count)
+                 {
+                     C.WriteLine("Missing connection address.");
+                     return false;
+                 }
+ 
+-                connectAddress = enumerator.Current;
++                connectAddress = args[i];
+             }
+             else if (arg == "--ss14-address")
+             {
+-                if (!enumerator.MoveNext())
++                if (++i >= args.Count)
+                 {
+                     C.WriteLine("Missing SS14 address.");
+                     return false;
+                 }
+ 
+-                ss14Address = enumerator.Current;
++                ss14Address = args[i];
+             }
+             else if (arg == "--self-contained")
+             {
+@@ -80,23 +78,23 @@ internal sealed class CommandLineArgs
+             }
+             else if (arg == "--username")
+             {
+-                if (!enumerator.MoveNext())
++                if (++i >= args.Count)
+                 {
+                     C.WriteLine("Missing username.");
+                     return false;
+                 }
+ 
+-                username = enumerator.Current;
++                username = args[i];
+             }
+             else if (arg == "--cvar")
+             {
+-                if (!enumerator.MoveNext())
++                if (++i >= args.Count)
+                 {
+                     C.WriteLine("Missing cvar value.");
+                     return false;
+                 }
+ 
+-                var cvar = enumerator.Current;
++                var cvar = args[i];
+                 DebugTools.AssertNotNull(cvar);
+                 var pos = cvar.IndexOf('=');
+ 
+@@ -110,33 +108,33 @@ internal sealed class CommandLineArgs
+             }
+             else if (arg == "--mount-zip")
+             {
+-                if (!enumerator.MoveNext())
++                if (++i >= args.Count)
+                 {
+                     C.WriteLine("Missing mount path");
+                     return false;
+                 }
+ 
+-                mountOptions.ZipMounts.Add(enumerator.Current);
++                mountOptions.ZipMounts.Add(args[i]);
+             }
+             else if (arg == "--mount-dir")
+             {
+-                if (!enumerator.MoveNext())
++                if (++i >= args.Count)
+                 {
+                     C.WriteLine("Missing mount path");
+                     return false;
+                 }
+ 
+-                mountOptions.DirMounts.Add(enumerator.Current);
++                mountOptions.DirMounts.Add(args[i]);
+             }
+             else if (arg == "--loglevel")
+             {
+-                if (!enumerator.MoveNext())
++                if (++i >= args.Count)
+                 {
+                     C.WriteLine("Missing loglevel sawmill.");
+                     return false;
+                 }
+ 
+-                var loglevel = enumerator.Current;
++                var loglevel = args[i];
+                 DebugTools.AssertNotNull(loglevel);
+                 var pos = loglevel.IndexOf('=');
+ 
+@@ -155,7 +153,13 @@ internal sealed class CommandLineArgs
+             }
+             else if (arg.StartsWith("+"))
+             {
+-                execCommands.Add(arg[1..]);
++                var cmd = arg[1..];
++                while (i + 1 < args.Count && !args[i + 1].StartsWith("+") && !args[i + 1].StartsWith("--"))
++                {
++                    i++;
++                    cmd += " " + args[i];
++                }
++                execCommands.Add(cmd);
+             }
+             else
+             {
+diff --git a/Robust.Client/ContentStart.cs b/Robust.Client/ContentStart.cs
+index 5e94723..6fa6021 100644
+--- a/Robust.Client/ContentStart.cs
++++ b/Robust.Client/ContentStart.cs
+@@ -4,11 +4,7 @@ namespace Robust.Client
+     {
+         public static void Start(string[] args)
+         {
+-#if FULL_RELEASE
+-            throw new System.InvalidOperationException("ContentStart.Start is not available on a full release.");
+-#else
+             GameController.Start(args, new GameControllerOptions(), true);
+-#endif
+         }
+ 
+         public static void StartLibrary(string[] args, GameControllerOptions options)
+diff --git a/Robust.Client/GameController/GameController.Input.cs b/Robust.Client/GameController/GameController.Input.cs
+index a6bc6a0..42ecf99 100644
+--- a/Robust.Client/GameController/GameController.Input.cs
++++ b/Robust.Client/GameController/GameController.Input.cs
+@@ -49,5 +49,10 @@ namespace Robust.Client
+                 return;
+             }
+         }
++
++        public void TouchFinger(TouchFingerEventArgs touchEvent)
++        {
++            _userInterfaceManager.TouchFinger(touchEvent);
++        }
+     }
+ }
+diff --git a/Robust.Client/GameController/GameController.IoC.cs b/Robust.Client/GameController/GameController.IoC.cs
+index 6079fa6..3e2161b 100644
+--- a/Robust.Client/GameController/GameController.IoC.cs
++++ b/Robust.Client/GameController/GameController.IoC.cs
+@@ -1,4 +1,4 @@
+-﻿using System;
++using System;
+ using System.Collections.Generic;
+ using System.Reflection;
+ using Robust.Shared.ContentPack;
+@@ -19,14 +19,13 @@ namespace Robust.Client
+ 
+         internal static void RegisterReflection(IDependencyCollection deps)
+         {
+-            // Gets a handle to the shared and the current (client) dll.
+-            deps.Resolve<IReflectionManager>().LoadAssemblies(new List<Assembly>(2)
++            var assemblies = new List<Assembly>
+             {
+-                // Do NOT register Robust.Client.Godot.
+-                // At least not for now.
+                 AppDomain.CurrentDomain.GetAssemblyByName("Robust.Shared"),
+                 Assembly.GetExecutingAssembly()
+-            });
++            };
++
++            deps.Resolve<IReflectionManager>().LoadAssemblies(assemblies);
+         }
+     }
+ }
+diff --git a/Robust.Client/GameController/GameController.Standalone.cs b/Robust.Client/GameController/GameController.Standalone.cs
+index e899f8c..db89ebc 100644
+--- a/Robust.Client/GameController/GameController.Standalone.cs
++++ b/Robust.Client/GameController/GameController.Standalone.cs
+@@ -166,7 +166,15 @@ namespace Robust.Client
+             if (!_dontStart)
+             {
+                 DebugTools.AssertNotNull(_mainLoop);
+-                _mainLoop!.Run();
++                AppDomain.CurrentDomain.SetData("SS14_ENGINE_READY", true);
++                try
++                {
++                    _mainLoop!.Run();
++                }
++                finally
++                {
++                    AppDomain.CurrentDomain.SetData("SS14_ENGINE_READY", false);
++                }
+             }
+ 
+             CleanupGameThread();
+diff --git a/Robust.Client/GameController/GameController.cs b/Robust.Client/GameController/GameController.cs
+index 14f5770..95e1028 100644
+--- a/Robust.Client/GameController/GameController.cs
++++ b/Robust.Client/GameController/GameController.cs
+@@ -266,7 +266,14 @@ namespace Robust.Client
+ 
+             if (_configurationManager.GetCVar(CVars.SysGCCollectStart))
+             {
+-                GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
++                try
++                {
++                    GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
++                }
++                catch (PlatformNotSupportedException)
++                {
++                    // LargeObjectHeapCompactionMode is not supported on Android/Mono.
++                }
+                 GC.Collect();
+             }
+ 
+@@ -335,6 +342,26 @@ namespace Robust.Client
+ 
+         private bool LoadModules()
+         {
++            if (OperatingSystem.IsAndroid() && _modLoader is BaseModLoader androidLoader)
++            {
++                // Register the APK assemblies in dependency order. They are compiled
++                // from the exact server revision, with the Android touch changes.
++                foreach (var name in new[]
++                {
++                    "Content.Shared.Database", "Content.DeadSpace.Interfaces.Shared",
++                    "Content.DeadSpace.Interfaces.Client", "Content.Shared", "Content.Client"
++                })
++                    androidLoader.RegisterAlreadyLoadedAssembly(System.Reflection.Assembly.Load(name));
++
++                // Fobos distributes two additional modules with its server content.
++                // Load them against the already registered, matching APK assemblies.
++                return _modLoader.TryLoadModules(new[]
++                {
++                    Options.AssemblyDirectory / "Content.DeadSpace.Shared.dll",
++                    Options.AssemblyDirectory / "Content.DeadSpace.Client.dll"
++                });
++            }
++
+             DebugTools.Assert(_resourceManifest != null);
+ 
+             var assemblyPrefix = Options.ContentModulePrefix ?? _resourceManifest!.AssemblyPrefix ?? "Content.";
+@@ -361,6 +388,22 @@ namespace Robust.Client
+             return true;
+         }
+ 
++        private void LogDebugInit(string message)
++        {
++            if (OperatingSystem.IsAndroid())
++            {
++                try
++                {
++                    System.IO.File.AppendAllText("/data/data/io.ss14.touch.fobos276/files/debug_init.txt", message + "\n");
++                }
++                catch {}
++            }
++            else
++            {
++                _logger.Debug(message);
++            }
++        }
++
+         internal bool StartupSystemSplash(
+             GameControllerOptions options,
+             Func<ILogHandler>? logHandlerFactory,
+@@ -482,6 +525,7 @@ namespace Robust.Client
+             _clyde.KeyUp += KeyUp;
+             _clyde.KeyDown += KeyDown;
+             _clyde.MouseWheel += MouseWheel;
++            _clyde.TouchFinger += TouchFinger;
+             _clyde.CloseWindow += args =>
+             {
+                 if (args.Window == _clyde.MainWindow)
+diff --git a/Robust.Client/Graphics/Clyde/Clyde.Events.cs b/Robust.Client/Graphics/Clyde/Clyde.Events.cs
+index f5afe1b..52f56c3 100644
+--- a/Robust.Client/Graphics/Clyde/Clyde.Events.cs
++++ b/Robust.Client/Graphics/Clyde/Clyde.Events.cs
+@@ -1,4 +1,4 @@
+-﻿// Makes switching easier.
++// Makes switching easier.
+ #if EXCEPTION_TOLERANCE
+ #define EXCEPTION_TOLERANCE_LOCAL
+ using System;
+@@ -84,6 +84,9 @@ namespace Robust.Client.Graphics.Clyde
+                 case DEventInputModeChanged:
+                     RaiseInputModeChanged();
+                     break;
++                case DEventTouchFinger(var args):
++                    TouchFinger?.Invoke(args);
++                    break;
+             }
+         }
+ 
+@@ -160,9 +163,16 @@ namespace Robust.Client.Graphics.Clyde
+             _eventDispatchQueue.Enqueue(new DEventInputModeChanged());
+         }
+ 
++        private void SendTouchFinger(TouchFingerEventArgs ev)
++        {
++            _eventDispatchQueue.Enqueue(new DEventTouchFinger(ev));
++        }
++
+         // D stands for Dispatch
+         private abstract record DEventBase;
+ 
++        private sealed record DEventTouchFinger(TouchFingerEventArgs Args) : DEventBase;
++
+         private sealed record DEventKeyUp(KeyEventArgs Args) : DEventBase;
+ 
+         private sealed record DEventKeyDown(KeyEventArgs Args) : DEventBase;
+diff --git a/Robust.Client/Graphics/Clyde/Clyde.LightRendering.cs b/Robust.Client/Graphics/Clyde/Clyde.LightRendering.cs
+index cbc2da3..1057f16 100644
+--- a/Robust.Client/Graphics/Clyde/Clyde.LightRendering.cs
++++ b/Robust.Client/Graphics/Clyde/Clyde.LightRendering.cs
+@@ -33,7 +33,7 @@ namespace Robust.Client.Graphics.Clyde
+ 
+         // Horizontal width, in pixels, of the shadow maps used to render FOV.
+         // I figured this was more accuracy sensitive than lights so resolution is significantly higher.
+-        private const int FovMapSize = 2048;
++        private static int FovMapSize => OperatingSystem.IsAndroid() ? 512 : 2048;
+ 
+         private ClydeShaderInstance _fovDebugShaderInstance = default!;
+ 
+@@ -197,9 +197,19 @@ namespace Robust.Client.Graphics.Clyde
+ 
+             ClydeHandle LoadShaderHandle(string path)
+             {
+-                if (_resourceCache.TryGetResource(path, out ShaderSourceResource? resource))
++                try
+                 {
+-                    return resource.ClydeHandle;
++                    if (_resourceCache.TryGetResource(path, out ShaderSourceResource? resource))
++                    {
++                        var handle = resource.ClydeHandle;
++                        System.Console.WriteLine($"[ClydeLighting] Shader '{path}' loaded successfully! Handle={handle}, InLoadedShaders={_loadedShaders.ContainsKey(handle)}");
++                        return handle;
++                    }
++                    System.Console.WriteLine($"[ClydeLighting] TryGetResource returned false for '{path}'");
++                }
++                catch (Exception ex)
++                {
++                    System.Console.WriteLine($"[ClydeLighting] Exception in LoadShaderHandle for '{path}': {ex}");
+                 }
+ 
+                 _clydeSawmill.Warning($"Can't load shader {path}\n");
+@@ -298,15 +308,30 @@ namespace Robust.Client.Graphics.Clyde
+             CheckGlError();
+             if (_hasGLFloatFramebuffers)
+             {
+-                GL.ClearColor(arbitraryDistanceMax, arbitraryDistanceMax * arbitraryDistanceMax, 0, 1);
++                if (_isGLES)
++                {
++                    Span<float> clearColor = [arbitraryDistanceMax, arbitraryDistanceMax * arbitraryDistanceMax, 0f, 1f];
++                    unsafe
++                    {
++                        fixed (float* ptr = clearColor)
++                        {
++                            GL.ClearBuffer(ClearBuffer.Color, 0, ptr);
++                        }
++                    }
++                    GL.Clear(ClearBufferMask.DepthBufferBit);
++                }
++                else
++                {
++                    GL.ClearColor(arbitraryDistanceMax, arbitraryDistanceMax * arbitraryDistanceMax, 0, 1);
++                    GL.Clear(ClearBufferMask.DepthBufferBit | ClearBufferMask.ColorBufferBit);
++                }
+             }
+             else
+             {
+                 GL.ClearColor(1, 1, 1, 1);
++                GL.Clear(ClearBufferMask.DepthBufferBit | ClearBufferMask.ColorBufferBit);
+             }
+ 
+-            CheckGlError();
+-            GL.Clear(ClearBufferMask.DepthBufferBit | ClearBufferMask.ColorBufferBit);
+             CheckGlError();
+ 
+             BindVertexArray(_occlusionVao.Handle);
+@@ -430,8 +455,22 @@ namespace Robust.Client.Graphics.Clyde
+ 
+             ApplyLightingFovToBuffer(viewport, eye);
+ 
+-            var lightShader = _loadedShaders[_enableSoftShadows ? _lightSoftShaderHandle : _lightHardShaderHandle]
+-                .Program;
++            var targetHandle = _enableSoftShadows ? _lightSoftShaderHandle : _lightHardShaderHandle;
++            if (targetHandle == default || !_loadedShaders.TryGetValue(targetHandle, out var loadedLight))
++            {
++                targetHandle = _enableSoftShadows ? _lightHardShaderHandle : _lightSoftShaderHandle;
++                if (targetHandle == default || !_loadedShaders.TryGetValue(targetHandle, out loadedLight))
++                {
++                    System.Console.WriteLine($"[ClydeLighting] FAILED to find light shader! _enableSoftShadows={_enableSoftShadows}, softHandle={_lightSoftShaderHandle}, hardHandle={_lightHardShaderHandle}, loadedShadersCount={_loadedShaders.Count}");
++                    ResetBlendFunc();
++                    IsStencilling = false;
++                    BindRenderTargetFull(viewport.RenderTarget);
++                    GL.Viewport(0, 0, viewport.Size.X, viewport.Size.Y);
++                    _lightingReady = false;
++                    return;
++                }
++            }
++            var lightShader = loadedLight.Program;
+             lightShader.Use();
+ 
+             SetupGlobalUniformsImmediate(lightShader, ShadowTexture);
+@@ -549,14 +588,17 @@ namespace Robust.Client.Graphics.Clyde
+             if (_cfg.GetCVar(CVars.LightBlur))
+                 BlurRenderTarget(viewport, viewport.LightRenderTarget, viewport.LightBlurTarget, eye, 14f);
+ 
+-            using (_prof.Group("BlurOntoWalls"))
++            if (_cfg.GetCVar(CVars.LightWallBleed))
+             {
+-                BlurOntoWalls(viewport, eye);
+-            }
++                using (_prof.Group("BlurOntoWalls"))
++                {
++                    BlurOntoWalls(viewport, eye);
++                }
+ 
+-            using (_prof.Group("MergeWallLayer"))
+-            {
+-                MergeWallLayer(viewport);
++                using (_prof.Group("MergeWallLayer"))
++                {
++                    MergeWallLayer(viewport);
++                }
+             }
+ 
+             BindRenderTargetFull(viewport.RenderTarget);
+@@ -754,7 +796,10 @@ namespace Robust.Client.Graphics.Clyde
+             CalcScreenMatrices(viewport.Size, out var proj, out var view);
+             SetProjViewBuffer(proj, view);
+ 
+-            var shader = _loadedShaders[_wallBleedBlurShaderHandle].Program;
++            if (_wallBleedBlurShaderHandle == default || !_loadedShaders.TryGetValue(_wallBleedBlurShaderHandle, out var loadedWallBleed))
++                return;
++
++            var shader = loadedWallBleed.Program;
+             shader.Use();
+ 
+             SetupGlobalUniformsImmediate(shader, viewport.LightRenderTarget.Texture);
+@@ -815,7 +860,10 @@ namespace Robust.Client.Graphics.Clyde
+             CheckGlError();
+             IsBlending = false;
+ 
+-            var shader = _loadedShaders[_mergeWallLayerShaderHandle].Program;
++            if (_mergeWallLayerShaderHandle == default || !_loadedShaders.TryGetValue(_mergeWallLayerShaderHandle, out var loadedMerge))
++                return;
++
++            var shader = loadedMerge.Program;
+             shader.Use();
+ 
+             var tex = viewport.WallBleedIntermediateRenderTarget2.Texture;
+@@ -847,7 +895,13 @@ namespace Robust.Client.Graphics.Clyde
+ 
+             // Applies FOV to the final framebuffer.
+ 
+-            var fovShader = _loadedShaders[_fovShaderHandle].Program;
++            if (_fovShaderHandle == default || !_loadedShaders.TryGetValue(_fovShaderHandle, out var loadedFov))
++            {
++                System.Console.WriteLine($"[ClydeLighting] ApplyFovToBuffer: fovHandle={_fovShaderHandle}, inLoaded={_loadedShaders.ContainsKey(_fovShaderHandle)} -> RETURNING!");
++                return;
++            }
++
++            var fovShader = loadedFov.Program;
+             fovShader.Use();
+ 
+             SetupGlobalUniformsImmediate(fovShader, FovTexture);
+@@ -870,7 +924,10 @@ namespace Robust.Client.Graphics.Clyde
+         {
+             // Applies FOV to the lighting framebuffer.
+ 
+-            var fovShader = _loadedShaders[_fovLightShaderHandle].Program;
++            if (_fovLightShaderHandle == default || !_loadedShaders.TryGetValue(_fovLightShaderHandle, out var loadedFovLight))
++                return;
++
++            var fovShader = loadedFovLight.Program;
+             fovShader.Use();
+ 
+             SetupGlobalUniformsImmediate(fovShader, FovTexture);
+@@ -1235,6 +1292,10 @@ namespace Robust.Client.Graphics.Clyde
+ 
+         private void MaxShadowcastingLightsChanged(int newValue)
+         {
++            if (OperatingSystem.IsAndroid() && newValue > 24)
++            {
++                newValue = 16;
++            }
+             _maxShadowcastingLights = newValue;
+             DebugTools.Assert(_maxLights >= _maxShadowcastingLights);
+ 
+@@ -1267,6 +1328,10 @@ namespace Robust.Client.Graphics.Clyde
+ 
+         private void MaxLightsChanged(int value)
+         {
++            if (OperatingSystem.IsAndroid() && value > 512)
++            {
++                value = 256;
++            }
+             _maxLights = value;
+             _lightsToRenderList = new (PointLightComponent, Vector2, float , Angle)[value];
+             DebugTools.Assert(_maxLights >= _maxShadowcastingLights);
+diff --git a/Robust.Client/Graphics/Clyde/Clyde.Shaders.cs b/Robust.Client/Graphics/Clyde/Clyde.Shaders.cs
+index 8514701..607fed7 100644
+--- a/Robust.Client/Graphics/Clyde/Clyde.Shaders.cs
++++ b/Robust.Client/Graphics/Clyde/Clyde.Shaders.cs
+@@ -153,6 +153,9 @@ namespace Robust.Client.Graphics.Clyde
+ 
+         private void LoadStockShaders()
+         {
++            if (OperatingSystem.IsAndroid())
++                _sawmillOgl.Info($"Android lighting compatibility: hardware_srgb={_hasGLSrgb}; GLES sampler precision override enabled={_isGLES}");
++
+             _shaderLibrary = ReadEmbeddedShader("z-library.glsl");
+ 
+             _shaderWrapCodeDefaultFrag = ReadEmbeddedShader("base-default.frag");
+@@ -207,6 +210,11 @@ namespace Robust.Client.Graphics.Clyde
+                     versionHeader += "#define NO_ARRAY_PRECISION\n";
+                 }
+ 
++                // Stage defines are appended AFTER this header. Do not guard
++                // precision declarations with FRAGMENT_SHADER here.
++                // Sampler precision controls the returned texture value: shadow
++                // moments in RG32F exceed the default lowp sampler range on GLES.
++                versionHeader += "#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\nprecision highp sampler2D;\n#else\nprecision mediump float;\nprecision mediump sampler2D;\n#endif\n";
+             }
+ 
+             if (_hasGLStandardDerivatives)
+@@ -249,9 +257,10 @@ namespace Robust.Client.Graphics.Clyde
+                 }
+                 catch (ShaderCompilationException e)
+                 {
+-                    File.WriteAllText("error.glsl", vertexSource);
++                    try { File.WriteAllText("error.glsl", vertexSource); } catch {}
++                    _clydeSawmill.Error($"Failed to compile vertex shader for '{name}': {e.Message}\nSource:\n{vertexSource}");
+                     throw new ShaderCompilationException(
+-                        "Failed to compile vertex shader, see inner for details (and error.glsl for formatted source).", e);
++                        $"Failed to compile vertex shader for '{name}': {e.Message}", e);
+                 }
+ 
+                 try
+@@ -260,9 +269,10 @@ namespace Robust.Client.Graphics.Clyde
+                 }
+                 catch (ShaderCompilationException e)
+                 {
+-                    File.WriteAllText("error.glsl", fragmentSource);
++                    try { File.WriteAllText("error.glsl", fragmentSource); } catch {}
++                    _clydeSawmill.Error($"Failed to compile fragment shader for '{name}': {e.Message}\nSource:\n{fragmentSource}");
+                     throw new ShaderCompilationException(
+-                        "Failed to compile fragment shader, see inner for details (and error.glsl for formatted source).", e);
++                        $"Failed to compile fragment shader for '{name}': {e.Message}", e);
+                 }
+ 
+                 var program = new GLShaderProgram(this, name);
+@@ -276,8 +286,8 @@ namespace Robust.Client.Graphics.Clyde
+                 catch (ShaderCompilationException e)
+                 {
+                     program.Delete();
+-
+-                    throw new ShaderCompilationException("Failed to link shaders. See inner for details.", e);
++                    _clydeSawmill.Error($"Failed to link shader program for '{name}': {e.Message}");
++                    throw new ShaderCompilationException($"Failed to link shader program for '{name}': {e.Message}", e);
+                 }
+ 
+                 return program;
+diff --git a/Robust.Client/Graphics/Clyde/Clyde.Windowing.cs b/Robust.Client/Graphics/Clyde/Clyde.Windowing.cs
+index 62cb3cd..6f3950a 100644
+--- a/Robust.Client/Graphics/Clyde/Clyde.Windowing.cs
++++ b/Robust.Client/Graphics/Clyde/Clyde.Windowing.cs
+@@ -1,4 +1,4 @@
+-﻿using System;
++using System;
+ using System.Collections.Generic;
+ using System.Diagnostics.CodeAnalysis;
+ using System.Numerics;
+@@ -50,6 +50,7 @@ namespace Robust.Client.Graphics.Clyde
+         public event Action<KeyEventArgs>? KeyUp;
+         public event Action<KeyEventArgs>? KeyDown;
+         public event Action<MouseWheelEventArgs>? MouseWheel;
++        public event Action<TouchFingerEventArgs>? TouchFinger;
+         public event Action<WindowRequestClosedEventArgs>? CloseWindow;
+         public event Action<WindowDestroyedEventArgs>? DestroyWindow;
+         public event Action<WindowContentScaleEventArgs>? OnWindowScaleChanged;
+diff --git a/Robust.Client/Graphics/Clyde/ClydeHeadless.cs b/Robust.Client/Graphics/Clyde/ClydeHeadless.cs
+index 093527e..02a960a 100644
+--- a/Robust.Client/Graphics/Clyde/ClydeHeadless.cs
++++ b/Robust.Client/Graphics/Clyde/ClydeHeadless.cs
+@@ -64,6 +64,7 @@ namespace Robust.Client.Graphics.Clyde
+         public event Action<KeyEventArgs>? KeyUp { add { } remove { } }
+         public event Action<KeyEventArgs>? KeyDown { add { } remove { } }
+         public event Action<MouseWheelEventArgs>? MouseWheel { add { } remove { } }
++        public event Action<TouchFingerEventArgs>? TouchFinger { add { } remove { } }
+         public event Action<WindowRequestClosedEventArgs>? CloseWindow { add { } remove { } }
+         public event Action<WindowDestroyedEventArgs>? DestroyWindow { add { } remove { } }
+ 
+diff --git a/Robust.Client/Graphics/Clyde/GLContext/GLContextEgl.cs b/Robust.Client/Graphics/Clyde/GLContext/GLContextEgl.cs
+index 9f14125..16841d6 100644
+--- a/Robust.Client/Graphics/Clyde/GLContext/GLContextEgl.cs
++++ b/Robust.Client/Graphics/Clyde/GLContext/GLContextEgl.cs
+@@ -1,4 +1,4 @@
+-﻿using System;
++using System;
+ using System.Collections.Generic;
+ using System.Runtime.InteropServices;
+ using System.Text;
+diff --git a/Robust.Client/Graphics/Clyde/GLContext/GLContextWindow.cs b/Robust.Client/Graphics/Clyde/GLContext/GLContextWindow.cs
+index 2fe5442..3a3e736 100644
+--- a/Robust.Client/Graphics/Clyde/GLContext/GLContextWindow.cs
++++ b/Robust.Client/Graphics/Clyde/GLContext/GLContextWindow.cs
+@@ -52,8 +52,11 @@ namespace Robust.Client.Graphics.Clyde
+             }
+ 
+             public override bool RequireWindowGL => true;
+-            // ANGLE does not support main window sRGB.
+-            public override bool HasBrokenWindowSrgb => Clyde._isGLES && OperatingSystem.IsWindows();
++            // SDL's GLES window is requested without FRAMEBUFFER_SRGB_CAPABLE.
++            // Android must use Clyde's shader sRGB conversion rather than sending
++            // linear colour directly to that window (which makes the image dark).
++            public override bool HasBrokenWindowSrgb => Clyde._isGLES &&
++                (OperatingSystem.IsWindows() || OperatingSystem.IsAndroid());
+ 
+             public GLContextWindow(Clyde clyde) : base(clyde)
+             {
+diff --git a/Robust.Client/Graphics/Clyde/Shaders/base-default.vert b/Robust.Client/Graphics/Clyde/Shaders/base-default.vert
+index 5195310..6893092 100644
+--- a/Robust.Client/Graphics/Clyde/Shaders/base-default.vert
++++ b/Robust.Client/Graphics/Clyde/Shaders/base-default.vert
+@@ -6,10 +6,10 @@
+ // Colour modulation.
+ /*layout (location = 3)*/ attribute vec4 modulate;
+ 
+-varying vec2 UV;
+-varying vec2 UV2;
+-varying vec2 Pos;
+-varying vec4 VtxModulate;
++varying highp vec2 UV;
++varying highp vec2 UV2;
++varying highp vec2 Pos;
++varying highp vec4 VtxModulate;
+ 
+ // Maybe we should merge these CPU side.
+ // idk yet.
+diff --git a/Robust.Client/Graphics/Clyde/Shaders/base-raw.vert b/Robust.Client/Graphics/Clyde/Shaders/base-raw.vert
+index 11fee7a..11c437e 100644
+--- a/Robust.Client/Graphics/Clyde/Shaders/base-raw.vert
++++ b/Robust.Client/Graphics/Clyde/Shaders/base-raw.vert
+@@ -6,8 +6,8 @@
+ // Colour modulation.
+ /*layout (location = 3)*/ attribute vec4 modulate;
+ 
+-varying vec2 UV;
+-varying vec2 UV2;
++varying highp vec2 UV;
++varying highp vec2 UV2;
+ 
+ // Maybe we should merge these CPU side.
+ // idk yet.
+diff --git a/Robust.Client/Graphics/Clyde/Shaders/shadow-depth.frag b/Robust.Client/Graphics/Clyde/Shaders/shadow-depth.frag
+index afb8f18..e4c4184 100644
+--- a/Robust.Client/Graphics/Clyde/Shaders/shadow-depth.frag
++++ b/Robust.Client/Graphics/Clyde/Shaders/shadow-depth.frag
+@@ -10,7 +10,9 @@ void main()
+     // p: Distance to closest point of line
+     // theta: Angle being queried
+     // phi: Angle of closest point of line - inherently on 90-degree angle to line angle
+-    highp float dist = abs(fragControl.z / cos(fragControl.x - fragControl.y));
++    highp float cosVal = cos(fragControl.x - fragControl.y);
++    if (abs(cosVal) < 1e-4) cosVal = sign(cosVal) * 1e-4;
++    highp float dist = clamp(abs(fragControl.z / cosVal), 0.0, 1000.0);
+ 
+     // Main body.
+ #ifdef HAS_DFDX
+diff --git a/Robust.Client/Graphics/Clyde/Shaders/shadow-depth.vert b/Robust.Client/Graphics/Clyde/Shaders/shadow-depth.vert
+index 76c0d73..9442690 100644
+--- a/Robust.Client/Graphics/Clyde/Shaders/shadow-depth.vert
++++ b/Robust.Client/Graphics/Clyde/Shaders/shadow-depth.vert
+@@ -12,7 +12,7 @@ attribute vec4 aPos;
+ attribute vec2 subVertex;
+ 
+ // x: actual angle, y: line angle + 90 degrees, z: Distance at y
+-varying vec3 fragControl;
++varying highp vec3 fragControl;
+ 
+ // Note: This is *not* the standard projectionMatrix!
+ uniform vec2 shadowLightCentre;
+@@ -34,6 +34,8 @@ void main()
+     // aPos is clockwise, but we need anticlockwise so swap it here
+     vec2 pA = aPos.zw - shadowLightCentre;
+     vec2 pB = aPos.xy - shadowLightCentre;
++    if (dot(pA, pA) < 1e-8) pA = vec2(1e-4, 0.0);
++    if (dot(pB, pB) < 1e-8) pB = vec2(1e-4, 0.0);
+     float xA = atan(pA.y, -pA.x);
+     float xB = atan(pB.y, -pB.x);
+ 
+@@ -72,7 +74,15 @@ void main()
+ 
+     // Calculate the necessary control data for the fragment shader.
+     vec2 lineNormal = pB - pA; // hypothetical: <- would have negative X, zero Y
+-    lineNormal /= length(lineNormal);
++    float lineLen = length(lineNormal);
++    if (lineLen < 1e-5)
++    {
++        lineNormal = vec2(1.0, 0.0);
++    }
++    else
++    {
++        lineNormal /= lineLen;
++    }
+     fragControl = vec3(
+         // Angle
+         targetAngle,
+diff --git a/Robust.Client/Graphics/Clyde/Shaders/winblit.vert b/Robust.Client/Graphics/Clyde/Shaders/winblit.vert
+index 75211d3..a0f5bee 100644
+--- a/Robust.Client/Graphics/Clyde/Shaders/winblit.vert
++++ b/Robust.Client/Graphics/Clyde/Shaders/winblit.vert
+@@ -10,7 +10,7 @@
+ // Texture coordinates.
+ /*layout (location = 1)*/ attribute vec2 tCoord;
+ 
+-varying vec2 UV;
++varying highp vec2 UV;
+ 
+ void main()
+ {
+diff --git a/Robust.Client/Graphics/Clyde/Windowing/Sdl3.Event.cs b/Robust.Client/Graphics/Clyde/Windowing/Sdl3.Event.cs
+index 80f9d62..6dcbca7 100644
+--- a/Robust.Client/Graphics/Clyde/Windowing/Sdl3.Event.cs
++++ b/Robust.Client/Graphics/Clyde/Windowing/Sdl3.Event.cs
+@@ -1,9 +1,10 @@
+-﻿using System;
++using System;
+ using System.Numerics;
+ using Robust.Client.Input;
+ using Robust.Shared.Map;
+ using SDL3;
+ using Key = Robust.Client.Input.Keyboard.Key;
++using Button = Robust.Client.Input.Mouse.Button;
+ using ET = SDL3.SDL.SDL_EventType;
+ using SDL_Keymod = SDL3.SDL.SDL_Keymod;
+ 
+@@ -15,8 +16,45 @@ internal partial class Clyde
+     {
+         public void ProcessEvents(bool single = false)
+         {
++            EventMouseMotion? pendingMotion = null;
++            Vector2 accumulatedDelta = Vector2.Zero;
++
++            void FlushPendingMotion()
++            {
++                if (pendingMotion != null)
++                {
++                    try
++                    {
++                        ProcessEventMouseMotion(pendingMotion, accumulatedDelta);
++                    }
++                    catch (Exception e)
++                    {
++                        _sawmill.Error($"Caught exception in windowing event (EventMouseMotion):\n{e}");
++                    }
++                    pendingMotion = null;
++                    accumulatedDelta = Vector2.Zero;
++                }
++            }
++
+             while (_eventReader.TryRead(out var ev))
+             {
++                if (ev is EventMouseMotion motion)
++                {
++                    if (pendingMotion != null && pendingMotion.WindowId != motion.WindowId)
++                    {
++                        FlushPendingMotion();
++                    }
++
++                    pendingMotion = motion;
++                    accumulatedDelta += new Vector2(motion.XRel, motion.YRel);
++                    if (!single)
++                        continue;
++                }
++                else
++                {
++                    FlushPendingMotion();
++                }
++
+                 try
+                 {
+                     ProcessEvent(ev);
+@@ -29,6 +67,8 @@ internal partial class Clyde
+                 if (single)
+                     break;
+             }
++
++            FlushPendingMotion();
+         }
+ 
+         // Block waiting on the windowing -> game thread channel.
+@@ -69,6 +109,9 @@ internal partial class Clyde
+                 case EventMouseButton ev:
+                     ProcessEventMouseButton(ev);
+                     break;
++                case EventTouchFinger ev:
++                    ProcessEventTouchFinger(ev);
++                    break;
+                 case EventWheel ev:
+                     ProcessEventWheel(ev);
+                     break;
+@@ -162,18 +205,45 @@ internal partial class Clyde
+                 return;
+ 
+             var button = ConvertSdl3Button(ev.Button);
++
+             var key = Mouse.MouseButtonToKey(button);
+             EmitKeyEvent(key, ev.Type, false, ev.Mods, 0, 0);
+         }
+ 
+-        private void ProcessEventMouseMotion(EventMouseMotion ev)
++        private void ProcessEventTouchFinger(EventTouchFinger ev)
++        {
++            var windowReg = FindWindow(ev.WindowId) ?? _clyde._mainWindow;
++            if (windowReg == null)
++                return;
++
++            var fb = windowReg.FramebufferSize;
++            if (fb.X <= 0 || fb.Y <= 0)
++                fb = windowReg.WindowSize;
++            if (fb.X <= 0) fb.X = 1;
++            if (fb.Y <= 0) fb.Y = 1;
++
++            var pixelPos = new Vector2(ev.X * fb.X, ev.Y * fb.Y);
++            TouchFingerAction action = ev.Type switch
++            {
++                ET.SDL_EVENT_FINGER_DOWN => TouchFingerAction.Down,
++                ET.SDL_EVENT_FINGER_MOTION => TouchFingerAction.Motion,
++                ET.SDL_EVENT_FINGER_UP => TouchFingerAction.Up,
++                ET.SDL_EVENT_FINGER_CANCELED => TouchFingerAction.Cancel,
++                _ => TouchFingerAction.Cancel
++            };
++
++            var screenCoords = new ScreenCoordinates(pixelPos, windowReg.Id);
++            _clyde.SendTouchFinger(new TouchFingerEventArgs(action, ev.FingerId, screenCoords));
++        }
++
++        private void ProcessEventMouseMotion(EventMouseMotion ev, Vector2? customDelta = null)
+         {
+             var windowReg = FindWindow(ev.WindowId);
+             if (windowReg == null)
+                 return;
+ 
+             var newPos = new Vector2(ev.X, ev.Y) * windowReg.PixelRatio;
+-            var delta = new Vector2(ev.XRel, ev.YRel);
++            var delta = customDelta ?? new Vector2(ev.XRel, ev.YRel);
+             windowReg.LastMousePos = newPos;
+ 
+             _clyde._currentHoveredWindow = windowReg;
+diff --git a/Robust.Client/Graphics/Clyde/Windowing/Sdl3.RawEvent.cs b/Robust.Client/Graphics/Clyde/Windowing/Sdl3.RawEvent.cs
+index 1b6cdba..af2cb75 100644
+--- a/Robust.Client/Graphics/Clyde/Windowing/Sdl3.RawEvent.cs
++++ b/Robust.Client/Graphics/Clyde/Windowing/Sdl3.RawEvent.cs
+@@ -1,4 +1,4 @@
+-﻿using System;
++using System;
+ using System.Runtime.CompilerServices;
+ using System.Runtime.InteropServices;
+ using System.Threading.Tasks;
+@@ -73,6 +73,12 @@ internal partial class Clyde
+                 case ET.SDL_EVENT_QUIT:
+                     ProcessSdl3EventQuit();
+                     break;
++                case ET.SDL_EVENT_FINGER_DOWN:
++                case ET.SDL_EVENT_FINGER_UP:
++                case ET.SDL_EVENT_FINGER_MOTION:
++                case ET.SDL_EVENT_FINGER_CANCELED:
++                    ProcessSdl3EventTouchFinger(in ev.tfinger);
++                    break;
+             }
+         }
+ 
+@@ -81,6 +87,20 @@ internal partial class Clyde
+             SendEvent(new EventQuit());
+         }
+ 
++        private void ProcessSdl3EventTouchFinger(in SDL.SDL_TouchFingerEvent ev)
++        {
++            SendEvent(new EventTouchFinger
++            {
++                WindowId = ev.windowID,
++                Type = (ET)ev.type,
++                FingerId = (long)ev.fingerID,
++                X = ev.x,
++                Y = ev.y,
++                Dx = ev.dx,
++                Dy = ev.dy,
++            });
++        }
++
+         private void ProcessSdl3EventMouseWheel(in SDL.SDL_MouseWheelEvent ev)
+         {
+             SendEvent(new EventWheel { WindowId = ev.windowID, XOffset = ev.x, YOffset = ev.y });
+@@ -279,6 +299,17 @@ internal partial class Clyde
+ 
+         private sealed class EventKeyMapChanged : EventBase;
+ 
++        private sealed class EventTouchFinger : EventBase
++        {
++            public uint WindowId;
++            public ET Type;
++            public long FingerId;
++            public float X;
++            public float Y;
++            public float Dx;
++            public float Dy;
++        }
++
+         private sealed class EventQuit : EventBase;
+ 
+ #if MACOS
+diff --git a/Robust.Client/Graphics/Clyde/Windowing/Sdl3.Window.cs b/Robust.Client/Graphics/Clyde/Windowing/Sdl3.Window.cs
+index dd12203..91fe3b9 100644
+--- a/Robust.Client/Graphics/Clyde/Windowing/Sdl3.Window.cs
++++ b/Robust.Client/Graphics/Clyde/Windowing/Sdl3.Window.cs
+@@ -214,6 +214,11 @@ internal partial class Clyde
+                     WsiShared.EnsureEglAvailable();
+             }
+ 
++            if (OperatingSystem.IsAndroid())
++            {
++                SDL.SDL_SetHint("SDL_ORIENTATIONS", "LandscapeLeft LandscapeRight");
++            }
++
+             if (parameters.Fullscreen)
+                 SDL.SDL_SetBooleanProperty(createProps, SDL.SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, true);
+ 
+@@ -300,7 +305,10 @@ internal partial class Clyde
+             SDL.SDL_GL_MakeCurrent(IntPtr.Zero, IntPtr.Zero);
+ 
+             if (parameters.Visible)
++            {
+                 SDL.SDL_ShowWindow(window);
++                SDL.SDL_RaiseWindow(window);
++            }
+ 
+             return (window, glContext);
+         }
+@@ -351,6 +359,8 @@ internal partial class Clyde
+ 
+             reg.PixelRatio = reg.FramebufferSize / (Vector2)reg.WindowSize;
+ 
++            SDL.SDL_RaiseWindow(window);
++
+             return reg;
+         }
+ 
+@@ -499,6 +509,25 @@ internal partial class Clyde
+             }
+         }
+ 
++#if WINDOWS
++        [MethodImpl(MethodImplOptions.NoInlining)]
++        private static unsafe bool DwmIsCompositionEnabledHelper()
++        {
++            BOOL compositing;
++            return Windows.SUCCEEDED(Windows.DwmIsCompositionEnabled(&compositing)) && compositing;
++        }
++
++        [MethodImpl(MethodImplOptions.NoInlining)]
++        private static void DwmFlushHelper(int swapInterval)
++        {
++            var i = swapInterval;
++            while (i-- > 0)
++            {
++                Windows.DwmFlush();
++            }
++        }
++#endif
++
+         public unsafe void WindowSwapBuffers(WindowReg window)
+         {
+             var reg = (Sdl3WindowReg)window;
+@@ -517,13 +546,12 @@ internal partial class Clyde
+             var dwmFlush = false;
+             var swapInterval = 0;
+ 
+-            if (!reg.Fullscreen && reg.SwapInterval > 0)
++            if (OperatingSystem.IsWindows() && !reg.Fullscreen && reg.SwapInterval > 0)
+             {
+-                BOOL compositing;
+                 // 6.2 is Windows 8
+                 // https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_osversioninfoexw
+                 if (OperatingSystem.IsWindowsVersionAtLeast(6, 2)
+-                    || Windows.SUCCEEDED(Windows.DwmIsCompositionEnabled(&compositing)) && compositing)
++                    || DwmIsCompositionEnabledHelper())
+                 {
+                     var curCtx = SDL.SDL_GL_GetCurrentContext();
+                     var curWin = SDL.SDL_GL_GetCurrentWindow();
+@@ -542,13 +570,9 @@ internal partial class Clyde
+             SDL.SDL_GL_SwapWindow(windowPtr);
+ 
+ #if WINDOWS
+-            if (dwmFlush)
++            if (OperatingSystem.IsWindows() && dwmFlush)
+             {
+-                var i = swapInterval;
+-                while (i-- > 0)
+-                {
+-                    Windows.DwmFlush();
+-                }
++                DwmFlushHelper(swapInterval);
+ 
+                 SDL.SDL_GL_SetSwapInterval(swapInterval);
+             }
+@@ -623,7 +647,18 @@ internal partial class Clyde
+ 
+         private static void WinThreadStartTextInput(CmdTextInputStart cmd)
+         {
++            if (OperatingSystem.IsAndroid())
++            {
++                var checkFunc = AppDomain.CurrentDomain.GetData("SS14_IS_HARDWARE_KEYBOARD_CONNECTED") as Func<bool>;
++                var isConnected = checkFunc != null ? checkFunc() : ((bool?)AppDomain.CurrentDomain.GetData("SS14_HARDWARE_KEYBOARD_CONNECTED") == true);
++                SDL.SDL_SetHint("SDL_ENABLE_SCREEN_KEYBOARD", isConnected ? "0" : "1");
++            }
++
+             SDL.SDL_StartTextInput(cmd.Window);
++            AppDomain.CurrentDomain.SetData("SS14_TEXT_INPUT_ACTIVE", true);
++
++            var dismissAction = AppDomain.CurrentDomain.GetData("SS14_DISMISS_SOFT_KEYBOARD_IF_HARDWARE") as Action;
++            dismissAction?.Invoke();
+         }
+ 
+         public void TextInputStop(WindowReg reg)
+@@ -634,6 +669,7 @@ internal partial class Clyde
+         private static void WinThreadStopTextInput(CmdTextInputStop cmd)
+         {
+             SDL.SDL_StopTextInput(cmd.Window);
++            AppDomain.CurrentDomain.SetData("SS14_TEXT_INPUT_ACTIVE", false);
+         }
+ 
+         public void ClipboardSetText(WindowReg mainWindow, string text)
+@@ -678,6 +714,11 @@ internal partial class Clyde
+                     return windowReg;
+             }
+ 
++            if (OperatingSystem.IsAndroid() || _clyde._windows.Count == 1)
++            {
++                return _clyde._mainWindow;
++            }
++
+             return null;
+         }
+ 
+diff --git a/Robust.Client/Graphics/Clyde/Windowing/Sdl3.cs b/Robust.Client/Graphics/Clyde/Windowing/Sdl3.cs
+index ee73bde..be9a7a2 100644
+--- a/Robust.Client/Graphics/Clyde/Windowing/Sdl3.cs
++++ b/Robust.Client/Graphics/Clyde/Windowing/Sdl3.cs
+@@ -1,4 +1,4 @@
+-﻿using System;
++using System;
+ using System.Runtime.CompilerServices;
+ using System.Runtime.InteropServices;
+ using System.Threading;
+@@ -65,6 +65,7 @@ internal partial class Clyde
+             SDL.SDL_SetHint(SDL.SDL_HINT_MAC_OPENGL_ASYNC_DISPATCH, "1");
+ #endif
+ 
++
+             var res = SDL.SDL_Init(SDL.SDL_InitFlags.SDL_INIT_VIDEO | SDL.SDL_InitFlags.SDL_INIT_EVENTS);
+             if (!res)
+             {
+diff --git a/Robust.Client/Graphics/IClydeInternal.cs b/Robust.Client/Graphics/IClydeInternal.cs
+index 388522f..6d889cf 100644
+--- a/Robust.Client/Graphics/IClydeInternal.cs
++++ b/Robust.Client/Graphics/IClydeInternal.cs
+@@ -32,6 +32,7 @@ namespace Robust.Client.Graphics
+         event Action<KeyEventArgs> KeyUp;
+         event Action<KeyEventArgs> KeyDown;
+         event Action<MouseWheelEventArgs> MouseWheel;
++        event Action<TouchFingerEventArgs> TouchFinger;
+         event Action<WindowRequestClosedEventArgs> CloseWindow;
+         event Action<WindowDestroyedEventArgs> DestroyWindow;
+ 
+diff --git a/Robust.Client/Input/InputManager.cs b/Robust.Client/Input/InputManager.cs
+index 96238a9..7fa535d 100644
+--- a/Robust.Client/Input/InputManager.cs
++++ b/Robust.Client/Input/InputManager.cs
+@@ -9,6 +9,7 @@ using System.Runtime.InteropServices;
+ using System.Text;
+ using JetBrains.Annotations;
+ using Robust.Client.UserInterface;
++using Robust.Client.UserInterface.Mobile;
+ using Robust.Shared.Collections;
+ using Robust.Shared.Console;
+ using Robust.Shared.ContentPack;
+@@ -222,6 +223,19 @@ namespace Robust.Client.Input
+                 return;
+             }
+ 
++            if (OperatingSystem.IsAndroid() && MobileControlsOverlay.IsSecondaryActive && args.Key == Key.MouseLeft)
++            {
++                // The game viewport is itself a UI control. Only actual widgets
++                // (inventory, chat, touch buttons, popups) should keep a left click.
++                var target = _uiMgr.MouseGetControl(MouseScreenPosition);
++                if (target == null || target is Robust.Client.UserInterface.CustomControls.IViewportControl)
++                {
++                    args = new KeyEventArgs(Key.MouseRight, args.IsRepeat, args.Alt, args.Control, args.Shift, args.System, args.ScanCode, args.RawCode);
++                    MobileControlsOverlay.ResetSecondaryMode();
++                }
++            }
++
++            // Subscribers must see the converted key, not a premature left click.
+             FirstChanceOnKeyEvent?.Invoke(args, args.IsRepeat ? KeyEventType.Repeat : KeyEventType.Down);
+ 
+             if (args.Handled)
+@@ -229,6 +243,24 @@ namespace Robust.Client.Input
+                 return;
+             }
+ 
++            if (OperatingSystem.IsAndroid() && MobileControlsOverlay.IsExamActive && args.Key == Key.MouseLeft)
++            {
++                var isUI = _uiMgr.MouseGetControl(MouseScreenPosition) != null;
++                if (!isUI)
++                {
++                    MobileControlsOverlay.ResetExamMode();
++                }
++            }
++
++            if (OperatingSystem.IsAndroid() && MobileControlsOverlay.IsPullActive && args.Key == Key.MouseLeft)
++            {
++                var isUI = _uiMgr.MouseGetControl(MouseScreenPosition) != null;
++                if (!isUI)
++                {
++                    MobileControlsOverlay.ResetPullMode();
++                }
++            }
++
+             _keysPressed[(int)args.Key] = true;
+ 
+             PackedKeyCombo matchedCombo = default;
+@@ -261,9 +293,13 @@ namespace Robust.Client.Input
+                     }
+                     else if (PackedIsSubPattern(matchedCombo, binding.PackedKeyCombo))
+                     {
+-                        if (hasAllowSubCombs)
++                        // UI clicks (UIClick / UIRightClick) must NEVER be suppressed by gameplay world combos
++                        // (such as TryPullObject = Ctrl+Click, ExamineEntity = Shift+Click, AltActivate = Alt+Click).
++                        // Otherwise, holding or toggling a modifier key completely freezes UI interaction.
++                        if (hasAllowSubCombs || binding.Function == EngineKeyFunctions.UIClick || binding.Function == EngineKeyFunctions.UIRightClick)
+                         {
+                             bindsDown.Add(binding);
++                            hasCanFocus |= binding.CanFocus;
+                         }
+                         else
+                         {
+@@ -321,6 +357,11 @@ namespace Robust.Client.Input
+                 return;
+             }
+ 
++            if (OperatingSystem.IsAndroid() && args.Key == Key.MouseLeft && _keysPressed[(int)Key.MouseRight] && !_keysPressed[(int)Key.MouseLeft])
++            {
++                args = new KeyEventArgs(Key.MouseRight, args.IsRepeat, args.Alt, args.Control, args.Shift, args.System, args.ScanCode, args.RawCode);
++            }
++
+             FirstChanceOnKeyEvent?.Invoke(args, KeyEventType.Up);
+ 
+             var hasCanFocus = false;
+diff --git a/Robust.Client/Input/TouchFingerEventArgs.cs b/Robust.Client/Input/TouchFingerEventArgs.cs
+new file mode 100644
+index 0000000..c139d8f
+--- /dev/null
++++ b/Robust.Client/Input/TouchFingerEventArgs.cs
+@@ -0,0 +1,27 @@
++using System;
++using System.Numerics;
++using Robust.Shared.Map;
++
++namespace Robust.Client.Input;
++
++public enum TouchFingerAction
++{
++    Down,
++    Motion,
++    Up,
++    Cancel
++}
++
++public sealed class TouchFingerEventArgs : EventArgs
++{
++    public TouchFingerAction Action { get; }
++    public long FingerId { get; }
++    public ScreenCoordinates Coordinates { get; }
++
++    public TouchFingerEventArgs(TouchFingerAction action, long fingerId, ScreenCoordinates coordinates)
++    {
++        Action = action;
++        FingerId = fingerId;
++        Coordinates = coordinates;
++    }
++}
+diff --git a/Robust.Client/Robust.Client.csproj b/Robust.Client/Robust.Client.csproj
+index c99c8a4..d6fb195 100644
+--- a/Robust.Client/Robust.Client.csproj
++++ b/Robust.Client/Robust.Client.csproj
+@@ -1,9 +1,9 @@
+-﻿<Project Sdk="Microsoft.NET.Sdk">
++<Project Sdk="Microsoft.NET.Sdk">
+   <Import Project="..\MSBuild\Robust.Engine.props" />
+   <PropertyGroup>
+     <IsPackable>false</IsPackable>
+     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+-    <OutputType>WinExe</OutputType>
++    <OutputType>Library</OutputType>
+     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+     <NoWarn>NU1701;CA1416</NoWarn>
+     <OutputPath>../bin/Client</OutputPath>
+diff --git a/Robust.Client/UserInterface/Control.Layout.cs b/Robust.Client/UserInterface/Control.Layout.cs
+index 2c7ef9c..d7f4f36 100644
+--- a/Robust.Client/UserInterface/Control.Layout.cs
++++ b/Robust.Client/UserInterface/Control.Layout.cs
+@@ -40,6 +40,7 @@ namespace Robust.Client.UserInterface
+         private Thickness _margin;
+         private bool _measuring;
+         private bool _arranging;
++        private bool _onlyPositionChanged;
+ 
+         /// <summary>
+         /// The desired minimum size this control needs for layout to avoid cutting off content or such.
+@@ -651,6 +652,7 @@ namespace Robust.Client.UserInterface
+ 
+                 if (!IsArrangeValid || PreviousArrange != finalRect)
+                 {
++                    _onlyPositionChanged = IsArrangeValid && PreviousArrange.HasValue && PreviousArrange.Value.Size == finalRect.Size;
+                     IsArrangeValid = true;
+                     ArrangeCore(finalRect);
+                     PreviousArrange = finalRect;
+@@ -659,6 +661,7 @@ namespace Robust.Client.UserInterface
+             finally
+             {
+                 _arranging = false;
++                _onlyPositionChanged = false;
+             }
+         }
+ 
+@@ -686,9 +689,11 @@ namespace Robust.Client.UserInterface
+ 
+             size = ApplySizeConstraints(this, size);
+ 
+-            var arranged = ArrangeOverride(size);
+-
+-            size = Vector2.Min(arranged, size);
++            if (!_onlyPositionChanged || size != Size)
++            {
++                var arranged = ArrangeOverride(size);
++                size = Vector2.Min(arranged, size);
++            }
+ 
+             switch (HorizontalAlignment)
+             {
+diff --git a/Robust.Client/UserInterface/Controls/ItemList.cs b/Robust.Client/UserInterface/Controls/ItemList.cs
+index b727287..0413d99 100644
+--- a/Robust.Client/UserInterface/Controls/ItemList.cs
++++ b/Robust.Client/UserInterface/Controls/ItemList.cs
+@@ -620,6 +620,13 @@ namespace Robust.Client.UserInterface.Controls
+             args.Handle();
+         }
+ 
++        public void ScrollByDelta(float deltaY)
++        {
++            _scrollBar.Value -= deltaY;
++            _scrollBar.ValueTarget = _scrollBar.Value;
++            _isAtBottom = _scrollBar.IsAtEnd;
++        }
++
+         [Pure]
+         private int _getScrollSpeed()
+         {
+diff --git a/Robust.Client/UserInterface/Controls/LineEdit.cs b/Robust.Client/UserInterface/Controls/LineEdit.cs
+index dd3a49a..956a45f 100644
+--- a/Robust.Client/UserInterface/Controls/LineEdit.cs
++++ b/Robust.Client/UserInterface/Controls/LineEdit.cs
+@@ -336,9 +336,12 @@ namespace Robust.Client.UserInterface.Controls
+             if (IgnoreNext)
+             {
+                 IgnoreNext = false;
++                AbortIme(delete: true);
+                 return;
+             }
+ 
++            AbortIme(delete: true);
++
+             InsertAtCursor(args.Text);
+             OnTextTyped?.Invoke(args);
+         }
+diff --git a/Robust.Client/UserInterface/Controls/OutputPanel.cs b/Robust.Client/UserInterface/Controls/OutputPanel.cs
+index e0d1624..0e88d11 100644
+--- a/Robust.Client/UserInterface/Controls/OutputPanel.cs
++++ b/Robust.Client/UserInterface/Controls/OutputPanel.cs
+@@ -260,6 +260,12 @@ namespace Robust.Client.UserInterface.Controls
+             _scrollBar.ValueTarget -= _getScrollSpeed() * args.Delta.Y;
+         }
+ 
++        public void ScrollByDelta(float deltaY)
++        {
++            _scrollBar.Value -= deltaY;
++            _scrollBar.ValueTarget = _scrollBar.Value;
++        }
++
+         protected override void Resized()
+         {
+             base.Resized();
+diff --git a/Robust.Client/UserInterface/Controls/ScrollBar.cs b/Robust.Client/UserInterface/Controls/ScrollBar.cs
+index d6abd43..1754fa6 100644
+--- a/Robust.Client/UserInterface/Controls/ScrollBar.cs
++++ b/Robust.Client/UserInterface/Controls/ScrollBar.cs
+@@ -104,7 +104,22 @@ namespace Robust.Client.UserInterface.Controls
+             var box = _getGrabberBox();
+             if (!box.Contains(args.RelativePixelPosition))
+             {
+-                return;
++                if (OperatingSystem.IsAndroid())
++                {
++                    var trackSize = _getOrientationSize();
++                    if (trackSize > 0)
++                    {
++                        var touchRel = _orientation == OrientationMode.Horizontal
++                            ? args.RelativePixelPosition.X
++                            : args.RelativePixelPosition.Y;
++                        var ratio = Math.Clamp(touchRel / trackSize, 0f, 1f);
++                        Value = MinValue + ratio * (MaxValue - MinValue);
++                    }
++                }
++                else
++                {
++                    return;
++                }
+             }
+ 
+             _grabData = (args.RelativePixelPosition, Value);
+diff --git a/Robust.Client/UserInterface/Controls/TextEdit.cs b/Robust.Client/UserInterface/Controls/TextEdit.cs
+index 4633b99..b74f173 100644
+--- a/Robust.Client/UserInterface/Controls/TextEdit.cs
++++ b/Robust.Client/UserInterface/Controls/TextEdit.cs
+@@ -1,4 +1,4 @@
+-﻿using System;
++using System;
+ using System.Collections.Frozen;
+ using System.Collections.Generic;
+ using System.Diagnostics.Contracts;
+@@ -725,6 +725,8 @@ public sealed class TextEdit : Control
+         if (!Editable)
+             return;
+ 
++        AbortIme(delete: true);
++
+         InsertAtCursor(args.Text);
+         _blink.Reset();
+         EnsureCursorVisible();
+diff --git a/Robust.Client/UserInterface/CustomControls/DefaultWindow.xaml.cs b/Robust.Client/UserInterface/CustomControls/DefaultWindow.xaml.cs
+index 9e6568e..2f7f08d 100644
+--- a/Robust.Client/UserInterface/CustomControls/DefaultWindow.xaml.cs
++++ b/Robust.Client/UserInterface/CustomControls/DefaultWindow.xaml.cs
+@@ -58,7 +58,7 @@ namespace Robust.Client.UserInterface.CustomControls
+             RobustXamlLoader.Load(this);
+             MouseFilter = MouseFilterMode.Stop;
+ 
+-            WindowHeader.MinSize = new Vector2(0, HEADER_SIZE_Y);
++            WindowHeader.MinSize = new Vector2(0, HeaderSizeY);
+ 
+             Contents = ContentsContainer;
+ 
+@@ -107,7 +107,7 @@ namespace Robust.Client.UserInterface.CustomControls
+         private const int DRAG_MARGIN_SIZE = 7;
+ 
+         // TODO: Un-hard code this header size.
+-        private const float HEADER_SIZE_Y = 25;
++        private static float HeaderSizeY => OperatingSystem.IsAndroid() ? 42f : 25f;
+         protected virtual Vector2 ContentsMinimumSize => new Vector2(50, 50);
+ 
+         protected override Vector2 MeasureOverride(Vector2 availableSize)
+@@ -196,7 +196,7 @@ namespace Robust.Client.UserInterface.CustomControls
+                 }
+             }
+ 
+-            if (mode == DragMode.None && relativeMousePos.Y < HEADER_SIZE_Y)
++            if (mode == DragMode.None && relativeMousePos.Y < HeaderSizeY)
+             {
+                 mode = DragMode.Move;
+             }
+diff --git a/Robust.Client/UserInterface/IUserInterfaceManagerInternal.cs b/Robust.Client/UserInterface/IUserInterfaceManagerInternal.cs
+index 29c54bc..a21a747 100644
+--- a/Robust.Client/UserInterface/IUserInterfaceManagerInternal.cs
++++ b/Robust.Client/UserInterface/IUserInterfaceManagerInternal.cs
+@@ -29,6 +29,7 @@ namespace Robust.Client.UserInterface
+         void MouseMove(MouseMoveEventArgs mouseMoveEventArgs);
+ 
+         void MouseWheel(MouseWheelEventArgs args);
++        void TouchFinger(TouchFingerEventArgs args);
+ 
+         void TextEntered(TextEnteredEventArgs textEnteredEvent);
+ 
+diff --git a/Robust.Client/UserInterface/Mobile/MobileControlsOverlay.cs b/Robust.Client/UserInterface/Mobile/MobileControlsOverlay.cs
+new file mode 100644
+index 0000000..f1651ce
+--- /dev/null
++++ b/Robust.Client/UserInterface/Mobile/MobileControlsOverlay.cs
+@@ -0,0 +1,1133 @@
++using System;
++using System.Collections.Generic;
++using System.Globalization;
++using System.IO;
++using System.Numerics;
++using Robust.Client.Graphics;
++using Robust.Client.Input;
++using Robust.Client.UserInterface;
++using Robust.Client.UserInterface.Controls;
++using Robust.Shared;
++using Robust.Shared.Configuration;
++using Robust.Shared.Input;
++using Robust.Shared.IoC;
++using Robust.Shared.Maths;
++
++namespace Robust.Client.UserInterface.Mobile;
++
++public sealed partial class MobileControlsOverlay : Control
++{
++    [Dependency] private readonly IConfigurationManager _cfg = default!;
++
++    public static bool IsEditMode { get; private set; }
++
++    private readonly VirtualThumbstick _thumbstick;
++    public static bool IsSecondaryActive { get; set; }
++    private static PojavActionButton? _staticSecButton;
++
++    public static void ResetSecondaryMode()
++    {
++        IsSecondaryActive = false;
++        if (_staticSecButton != null)
++        {
++            _staticSecButton.ResetToggle();
++        }
++    }
++
++    public static bool IsExamActive { get; set; }
++    private static PojavActionButton? _staticExamButton;
++
++    public static void ResetExamMode()
++    {
++        IsExamActive = false;
++        if (_staticExamButton != null && _staticExamButton.IsToggled)
++        {
++            _staticExamButton.ResetToggle();
++        }
++        else if (IoCManager.Resolve<IInputManager>().IsKeyDown(Keyboard.Key.Shift))
++        {
++            IoCManager.Resolve<IInputManager>().KeyUp(new KeyEventArgs(Keyboard.Key.Shift, false, false, false, false, false, 0));
++        }
++    }
++
++    public static bool IsPullActive { get; set; }
++    private static PojavActionButton? _staticPullButton;
++
++    public static void ResetPullMode()
++    {
++        IsPullActive = false;
++        if (_staticPullButton != null && _staticPullButton.IsToggled)
++        {
++            _staticPullButton.ResetToggle();
++        }
++        else if (IoCManager.Resolve<IInputManager>().IsKeyDown(Keyboard.Key.Control))
++        {
++            IoCManager.Resolve<IInputManager>().KeyUp(new KeyEventArgs(Keyboard.Key.Control, false, false, false, false, false, 0));
++        }
++    }
++
++    private readonly PojavActionButton _pullButton;
++    private readonly PojavActionButton _examButton;
++
++    private readonly PojavActionButton _useButton;
++    private readonly PojavActionButton _interactButton;
++    private readonly PojavActionButton _secButton;
++    private readonly PojavActionButton _handButton;
++    private readonly PojavActionButton _dropButton;
++    private readonly PojavActionButton _altButton;
++    private readonly PojavActionButton _bagButton;
++    private readonly PojavActionButton _throwButton;
++
++    private readonly Dictionary<long, Control> _claimedTouches = new();
++
++    private readonly PojavActionButton _escButton;
++    private readonly PojavActionButton _keybButton;
++    private readonly PojavActionButton _editButton;
++    private readonly PojavActionButton _hideButton;
++
++    private readonly Control _clusterContainer;
++    private readonly Control _topUtilityContainer;
++    private readonly Control _editorBarContainer;
++    private readonly Label _editorBanner;
++    private readonly Button _addBtn;
++    private readonly Button _scaleMinusBtn;
++    private readonly Button _scalePlusBtn;
++    private readonly Button _resetBtn;
++    private readonly Button _doneBtn;
