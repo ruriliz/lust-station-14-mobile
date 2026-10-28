@@ -1,0 +1,146 @@
+name: LustStation First Compile Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout Android port
+        uses: actions/checkout@v4
+        with:
+          ref: luststation-277
+
+      - name: Checkout pinned LustStation
+        uses: actions/checkout@v4
+        with:
+          repository: makura-games/lust-station
+          ref: 583c611c56fe54caf815ee98aceba2a87999c56f
+          path: space-station-14
+          submodules: recursive
+
+      - name: Apply Android engine patch
+        run: |
+          git -C space-station-14/RobustToolbox apply \
+            ../../patches/lust-mobile.patch
+
+      - name: Prepare engine resources
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+
+          root = Path("space-station-14/RobustToolbox/Resources")
+          with ZipFile("Content.Android/resources.zip", "w", ZIP_DEFLATED) as z:
+              for f in sorted(root.rglob("*")):
+                  if f.is_file():
+                      z.write(f, f.relative_to(root).as_posix())
+          PY
+
+      - name: Inspect Fobos dependencies
+        run: |
+          mkdir -p diagnostics
+          grep -RInE 'DeadSpace|Fobos' \
+            Content.Android \
+            --include='*.cs' \
+            --include='*.csproj' \
+            > diagnostics/fobos-references.txt || true
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install Android workload
+        run: dotnet workload install android
+        
+      - name: Configure NuGet for Android build
+        shell: bash
+        run: |
+          cat > NuGet.Config <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="nuget.org"
+                   value="https://api.nuget.org/v3/index.json" />
+            </packageSources>
+            <packageSourceMapping>
+              <clear />
+              <packageSource key="nuget.org">
+                <package pattern="*" />
+              </packageSource>
+            </packageSourceMapping>
+          </configuration>
+          EOF
+
+          echo "NuGet configuration created"
+          
+      - name: Restore NuGet dependencies
+        shell: bash
+        run: |
+          dotnet restore Content.Android/Content.Android.csproj \
+            --configfile "$GITHUB_WORKSPACE/NuGet.Config" \
+            -p:TargetOS=Android \
+            -p:FullRelease=true \
+            -v:minimal
+
+      - name: Attempt Debug compilation
+        shell: bash
+        run: |
+          set +e
+          dotnet build Content.Android/Content.Android.csproj \
+            --no-restore \
+            -c Debug \
+            -p:TargetOS=Android \
+            -p:FullRelease=true \
+            -p:RunAOTCompilation=false \
+            -p:UseSharedCompilation=false \
+            -v:minimal \
+            > diagnostics/build.log 2>&1
+          RESULT=$?
+          tail -n 100 diagnostics/build.log
+          echo "$RESULT" > diagnostics/exit-code.txt
+          exit "$RESULT"
+
+      - name: Collect Debug APK
+        if: success()
+        shell: bash
+        run: |
+          mkdir -p apk-output
+          find Content.Android/bin -type f -name '*.apk' \
+            -exec cp -t apk-output/ {} +
+          if ! find apk-output -type f -name '*.apk' -print -quit | grep -q .; then
+            echo "APK not found in build output"
+            exit 1
+          fi
+          ls -lh apk-output/
+
+      - name: Upload Debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: luststation-android-debug-apk
+          path: apk-output/*.apk
+          if-no-files-found: error
+
+
+      - name: Upload diagnostic report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: luststation-first-compile-report
+          path: diagnostics/
+          if-no-files-found: warn
