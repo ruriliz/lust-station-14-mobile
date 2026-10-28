@@ -94,6 +94,7 @@ jobs:
           dotnet restore Content.Android/Content.Android.csproj \
             --configfile "$GITHUB_WORKSPACE/NuGet.Config" \
             -p:TargetOS=Android \
+            -p:FullRelease=true \
             -v:minimal
 
       - name: Attempt Debug compilation
@@ -104,6 +105,7 @@ jobs:
             --no-restore \
             -c Debug \
             -p:TargetOS=Android \
+            -p:FullRelease=true \
             -p:RunAOTCompilation=false \
             -p:UseSharedCompilation=false \
             -v:minimal \
