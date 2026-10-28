@@ -115,6 +115,27 @@ jobs:
           echo "$RESULT" > diagnostics/exit-code.txt
           exit "$RESULT"
 
+      - name: Collect Debug APK
+        if: success()
+        shell: bash
+        run: |
+          mkdir -p apk-output
+          find Content.Android/bin -type f -name '*.apk' \
+            -exec cp -t apk-output/ {} +
+          if ! find apk-output -type f -name '*.apk' -print -quit | grep -q .; then
+            echo "APK not found in build output"
+            exit 1
+          fi
+          ls -lh apk-output/
+
+      - name: Upload Debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: luststation-android-debug-apk
+          path: apk-output/*.apk
+          if-no-files-found: error
+
 
       - name: Upload diagnostic report
         if: always()
