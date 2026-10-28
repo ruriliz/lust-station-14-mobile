@@ -65,7 +65,29 @@ jobs:
 
       - name: Install Android workload
         run: dotnet workload install android
+        
+      - name: Configure NuGet for Android build
+        shell: bash
+        run: |
+          cat > NuGet.Config <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="nuget.org"
+                   value="https://api.nuget.org/v3/index.json" />
+            </packageSources>
+            <packageSourceMapping>
+              <clear />
+              <packageSource key="nuget.org">
+                <package pattern="*" />
+              </packageSource>
+            </packageSourceMapping>
+          </configuration>
+          EOF
 
+          echo "NuGet configuration created"
+          
       - name: Attempt Debug compilation
         shell: bash
         run: |
