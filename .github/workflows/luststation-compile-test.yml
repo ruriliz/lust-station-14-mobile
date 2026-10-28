@@ -88,11 +88,20 @@ jobs:
 
           echo "NuGet configuration created"
           
+      - name: Restore NuGet dependencies
+        shell: bash
+        run: |
+          dotnet restore Content.Android/Content.Android.csproj \
+            --configfile "$GITHUB_WORKSPACE/NuGet.Config" \
+            -p:TargetOS=Android \
+            -v:minimal
+
       - name: Attempt Debug compilation
         shell: bash
         run: |
           set +e
           dotnet build Content.Android/Content.Android.csproj \
+            --no-restore \
             -c Debug \
             -p:TargetOS=Android \
             -p:RunAOTCompilation=false \
@@ -103,6 +112,7 @@ jobs:
           tail -n 100 diagnostics/build.log
           echo "$RESULT" > diagnostics/exit-code.txt
           exit "$RESULT"
+
 
       - name: Upload diagnostic report
         if: always()
